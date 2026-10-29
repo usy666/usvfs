@@ -38,6 +38,28 @@ namespace bf = boost::filesystem;
 namespace usvfs
 {
 
+// true if the native machine is ARM64, i.e. this process is emulated (Prism on
+// Windows, FEX under Wine/Proton)
+static bool isArm64Host()
+{
+  typedef BOOL(WINAPI * TIsWow64Process2)(HANDLE, USHORT*, USHORT*);
+
+  HMODULE k32Mod = GetModuleHandleA("kernel32.dll");
+  auto isWow64Process2 = k32Mod != nullptr
+      ? reinterpret_cast<TIsWow64Process2>(GetProcAddress(k32Mod, "IsWow64Process2"))
+      : nullptr;
+  if (isWow64Process2 == nullptr) {
+    return false;
+  }
+
+  USHORT processMachine = 0;
+  USHORT nativeMachine = 0;
+  if (!isWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+    return false;
+  }
+  return nativeMachine == IMAGE_FILE_MACHINE_ARM64;
+}
+
 HookManager *HookManager::s_Instance = nullptr;
 
 
@@ -237,6 +259,17 @@ void HookManager::initHooks()
   installHook(kbaseMod, k32Mod, "ExitProcess", hook_ExitProcess);
 
   installHook(kbaseMod, k32Mod, "CreateProcessInternalW", hook_CreateProcessInternalW, reinterpret_cast<LPVOID*>(&CreateProcessInternalW));
+
+  // On ARM64 hosts kernelbase may be ARM64EC code (Wine/Proton with FEX). The hook above
+  // then only patches the x64 export thunk, while CreateProcessW calls the native
+  // CreateProcessInternalW directly, so child processes would never be injected.
+  // Hooking the public entry points catches those calls.
+  if ((CreateProcessInternalW != nullptr) && isArm64Host()) {
+    spdlog::get("usvfs")->info("ARM64 host, hooking public CreateProcess functions");
+    installHook(kbaseMod, k32Mod, "CreateProcessA", hook_CreateProcessA);
+    installHook(kbaseMod, k32Mod, "CreateProcessW", hook_CreateProcessW);
+    installHook(kbaseMod, k32Mod, "CreateProcessAsUserW", hook_CreateProcessAsUserW);
+  }
 
   installHook(kbaseMod, k32Mod, "MoveFileA", hook_MoveFileA);
   installHook(kbaseMod, k32Mod, "MoveFileW", hook_MoveFileW);

@@ -336,6 +336,95 @@ BOOL WINAPI usvfs::hook_CreateProcessInternalW(
   return res;
 }
 
+BOOL WINAPI usvfs::hook_CreateProcessA(
+    LPCSTR lpApplicationName, LPSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes, BOOL bInheritHandles,
+    DWORD dwCreationFlags, LPVOID lpEnvironment, LPCSTR lpCurrentDirectory,
+    LPSTARTUPINFOA lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
+{
+  static_assert(sizeof(STARTUPINFOA) == sizeof(STARTUPINFOW),
+                "STARTUPINFOA and STARTUPINFOW are expected to share their layout");
+
+  std::wstring applicationName;
+  std::wstring commandLine;
+  std::wstring currentDirectory;
+  std::wstring desktop;
+  std::wstring title;
+  STARTUPINFOEXW startupInfo{};
+
+  // same conversion CreateProcessA does before it calls CreateProcessInternalW
+  try {
+    if (lpApplicationName != nullptr)
+      applicationName = string_cast<std::wstring>(lpApplicationName);
+    if (lpCommandLine != nullptr)
+      commandLine = string_cast<std::wstring>(lpCommandLine);
+    if (lpCurrentDirectory != nullptr)
+      currentDirectory = string_cast<std::wstring>(lpCurrentDirectory);
+
+    if (lpStartupInfo != nullptr) {
+      memcpy(&startupInfo.StartupInfo, lpStartupInfo, sizeof(startupInfo.StartupInfo));
+      startupInfo.StartupInfo.lpReserved = nullptr;
+      if (lpStartupInfo->lpDesktop != nullptr) {
+        desktop = string_cast<std::wstring>(lpStartupInfo->lpDesktop);
+        startupInfo.StartupInfo.lpDesktop = &desktop[0];
+      }
+      if (lpStartupInfo->lpTitle != nullptr) {
+        title = string_cast<std::wstring>(lpStartupInfo->lpTitle);
+        startupInfo.StartupInfo.lpTitle = &title[0];
+      }
+      if (dwCreationFlags & EXTENDED_STARTUPINFO_PRESENT) {
+        startupInfo.lpAttributeList
+            = reinterpret_cast<LPSTARTUPINFOEXA>(lpStartupInfo)->lpAttributeList;
+      }
+    }
+  } catch (const std::exception &e) {
+    spdlog::get("usvfs")->error("exception in {0}: {1}", __MYFUNC__, e.what());
+    return CreateProcessA(lpApplicationName, lpCommandLine, lpProcessAttributes,
+                          lpThreadAttributes, bInheritHandles, dwCreationFlags,
+                          lpEnvironment, lpCurrentDirectory, lpStartupInfo,
+                          lpProcessInformation);
+  }
+
+  return hook_CreateProcessInternalW(
+      nullptr,
+      lpApplicationName != nullptr ? applicationName.c_str() : nullptr,
+      lpCommandLine != nullptr ? &commandLine[0] : nullptr,
+      lpProcessAttributes, lpThreadAttributes, bInheritHandles, dwCreationFlags,
+      lpEnvironment,
+      lpCurrentDirectory != nullptr ? currentDirectory.c_str() : nullptr,
+      lpStartupInfo != nullptr ? &startupInfo.StartupInfo : nullptr,
+      lpProcessInformation, nullptr);
+}
+
+BOOL WINAPI usvfs::hook_CreateProcessW(
+    LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes, BOOL bInheritHandles,
+    DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
+{
+  // this is all CreateProcessW does. If the CreateProcessInternalW hook is reached as
+  // well, the CREATE_PROCESS group makes it pass through so we only inject once
+  return hook_CreateProcessInternalW(
+      nullptr, lpApplicationName, lpCommandLine, lpProcessAttributes,
+      lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment,
+      lpCurrentDirectory, lpStartupInfo, lpProcessInformation, nullptr);
+}
+
+BOOL WINAPI usvfs::hook_CreateProcessAsUserW(
+    HANDLE hToken, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes, BOOL bInheritHandles,
+    DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
+{
+  return hook_CreateProcessInternalW(
+      hToken, lpApplicationName, lpCommandLine, lpProcessAttributes,
+      lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment,
+      lpCurrentDirectory, lpStartupInfo, lpProcessInformation, nullptr);
+}
+
 BOOL WINAPI usvfs::hook_GetFileAttributesExW(
     LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId,
     LPVOID lpFileInformation)
